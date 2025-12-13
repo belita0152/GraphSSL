@@ -1,12 +1,14 @@
 import os
 from data.node import EEGNet
-from local.model import GCN
 import torch
 import torch.nn as nn
 import torch.optim as opt
 import numpy as np
 import random
 from data.graph_dataloader import get_dataloaders
+from local.model import GCN
+from meso.cluster import DiffPoolGAT
+import matplotlib.pyplot as plt
 
 
 random_seed = 777
@@ -22,28 +24,33 @@ train_path = os.path.join(src_path, 'driver_train_dataset.pt')
 test_path = os.path.join(src_path, 'driver_test_dataset.pt')
 
 
+
 class Trainer(object):
     def __init__(self):
         self.net1 = EEGNet(f1=8, f2=16, d=2,
                            input_time_length=384,
                            embedding_dim=64,
                            dropout_rate=0.5, sampling_rate=128, classes=2).to(device)
-        self.net2 = GCN(in_channels=64,
-                        out_channels=2,
-                        hidden_channels=32,
-                        dropout_rate=0.5).to(device)
+        self.net2 = DiffPoolGAT(in_channels=64,
+                             hidden_channels=32,
+                             out_channels=2,
+                             n_nodes=30,
+                             n_clusters=8).to(device)
 
         self.n_epochs = 100
         self.batch_size = 64
-        self.lr = 0.01
+        self.lr = 0.005
         self.criterion = nn.CrossEntropyLoss()
         self.optimizer = opt.AdamW(
             list(self.net1.parameters()) + list(self.net2.parameters()),
-            lr=self.lr
+            lr=self.lr,
+            weight_decay=1e-3
         )
-        self.scheduler = torch.optim.lr_scheduler.StepLR(self.optimizer, step_size=20, gamma=0.995)
+        self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(self.optimizer,
+                                                                    T_max=self.n_epochs,
+                                                                    eta_min=1e-5)
 
-        self.train_dataloader, self.test_dataloader = get_dataloaders(train_path, test_path, 64)
+        self.train_dataloader, self.test_dataloader = get_dataloaders(train_path, test_path, self.batch_size)
 
     def node_embed(self, batch):
         # 1. Node feature
@@ -58,13 +65,32 @@ class Trainer(object):
 
         return node_embeddings
 
+    def plot_results(self, train_acc_list, test_acc_list):
+        train_acc, test_acc = np.array(train_acc_list), np.array(test_acc_list)
+        epochs = range(1, len(train_acc) + 1)
+
+        plt.figure(figsize=(10, 6))
+        plt.plot(epochs, train_acc, 'b-', label='Train ACC')
+        plt.plot(epochs, test_acc, 'r-', label='Test ACC')
+        plt.title('Accuracy')
+        plt.xlabel('Epochs')
+        plt.ylabel('Accuracy (%)')
+        plt.legend()
+        plt.grid(True)
+        plt.show()
+
 
     def train(self):
+        initial_aux_weight = 0.1  # 초기 보조손실 가중치 비율
+
         best_train_acc, best_test_acc = 0, 0
+        train_acc_list, test_acc_list = [], []
 
         for epoch in range(self.n_epochs):
             self.net1.train()
             self.net2.train()
+
+            aux_weight = initial_aux_weight * (1 - epoch / self.n_epochs)
 
             total_loss, correct, total_samples = 0, 0, 0
 
@@ -72,13 +98,14 @@ class Trainer(object):
                 self.optimizer.zero_grad()
                 batch = batch.to(device)
 
-                # 1. Node feature Extraction -> Graph Feature Update
+                # 1. Extract Node Features  -> Update graphs
                 batch.x = self.node_embed(batch) # outputs of EEGNet -> used as node features
 
-                # 2. First Training in Local State (GCN)
-                out = self.net2(batch)
+                # 2. Train Local states + Cluster Meso states
+                out, link_loss, ent_loss = self.net2(batch)
 
-                loss = self.criterion(out, batch.y)
+                ce_loss = self.criterion(out, batch.y)
+                loss = (1.0 * ce_loss) + (aux_weight * link_loss) + (aux_weight * ent_loss)
                 loss.backward()
                 self.optimizer.step()
 
@@ -91,6 +118,7 @@ class Trainer(object):
 
             train_avg_loss = total_loss / len(self.train_dataloader)
             train_accuracy = 100 * correct / total_samples
+            train_acc_list.append(train_accuracy)
 
            # Validation
             self.net1.eval()
@@ -102,8 +130,10 @@ class Trainer(object):
                 batch = batch.to(device)
 
                 batch.x = self.node_embed(batch)
-                out = self.net2(batch)
-                loss = self.criterion(out, batch.y)
+                out, link_loss, ent_loss = self.net2(batch)
+
+                ce_loss = self.criterion(out, batch.y)
+                loss = (1.0 * ce_loss) + (aux_weight * link_loss) + (aux_weight * ent_loss)
                 test_loss += loss.item()
 
                 pred = out.argmax(dim=1)
@@ -115,6 +145,8 @@ class Trainer(object):
 
             test_avg_loss = test_loss / len(self.test_dataloader)
             test_accuracy = 100 * correct / test_samples
+
+            test_acc_list.append(test_accuracy)
 
             if train_accuracy > best_train_acc:
                 best_train_acc = train_accuracy
@@ -130,6 +162,11 @@ class Trainer(object):
         print(f"Best Train Acc: {best_train_acc:.2f}% | Best Test Acc: {best_test_acc:.2f}%")
         print("-" * 60)
 
+        self.plot_results(train_acc_list, test_acc_list)
+        
+
 if __name__ == '__main__':
     trainer = Trainer()
     trainer.train()
+        
+
