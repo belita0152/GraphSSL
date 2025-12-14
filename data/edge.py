@@ -6,10 +6,9 @@ from mne_connectivity import spectral_connectivity_epochs
 
 
 class CustomDataset(Dataset):
-    def __init__(self, x, y):
-        self.ch_names = ['Fp1', 'Fp2', 'F7', 'F3', 'Fz', 'F4', 'F8', 'FT7', 'FC3', 'FCZ', 'FC4', 'FT8', 'T3', 'C3', 'Cz',
-                         'C4', 'T4', 'TP7', 'CP3', 'CPz', 'CP4', 'TP8', 'T5', 'P3', 'PZ', 'P4', 'T6', 'O1', 'Oz', 'O2']
-        self.sfreq = 128
+    def __init__(self, x, y, ch_names, sfreq):
+        self.ch_names = ch_names
+        self.sfreq = sfreq
 
         self.x = x
         self.y = y
@@ -17,7 +16,7 @@ class CustomDataset(Dataset):
 
     def get_edge(self, x):
         info = mne.create_info(ch_names=self.ch_names, sfreq=self.sfreq, ch_types='eeg')
-        fmin, fmax = 8., 13.
+        fmin, fmax = 1., 40.
 
         edges_list = []
         n_samples = x.shape[0]
@@ -58,22 +57,22 @@ class CustomDataset(Dataset):
 
 
 if __name__ == "__main__":
-    from dataloader import AttentionDataset, MentalArtihmeticDataset, DrowsinessDataset
+    from dataloader import AttentionDataset, MentalArtihmeticDataset, DrowsinessDataset, MotorImageryDataset
     from utils import load_data
 
     device = torch.device('cuda:0')
-    batch_size = 64
-    save_path1, save_path2 = "train_proc_edge.pt", "test_proc_edge.pt"
+    batch_size = 32
+    save_path1, save_path2 = "mi_train_dataset.pt", "mi_test_dataset.pt"
 
-    driver = DrowsinessDataset()
-    x, y = driver.x, driver.y
+    dataset = MotorImageryDataset()
+    x, y = dataset.x, dataset.y
 
     (train_x_, train_y_), (test_x_, test_y_) = load_data(x, y, split_ratio=0.8)
 
-    train_dataset = CustomDataset(train_x_, train_y_)
+    train_dataset = CustomDataset(train_x_, train_y_, dataset.ch_names, dataset.sfreq)
     train_x, train_y, train_edge = train_dataset.x, train_dataset.y, train_dataset.edge
 
-    test_dataset = CustomDataset(test_x_, test_y_)
+    test_dataset = CustomDataset(test_x_, test_y_, dataset.ch_names, dataset.sfreq)
     test_x, test_y, test_edge = test_dataset.x, test_dataset.y, test_dataset.edge
 
     train_edge = torch.tensor(train_edge, dtype=torch.float)
@@ -83,8 +82,3 @@ if __name__ == "__main__":
     torch.save({'x': test_x_, 'y': test_y, 'edge': test_edge}, save_path2)
     print(f"저장 완료: {save_path1}")
     print(f"저장 완료: {save_path2}")
-
-
-
-
-
