@@ -1,8 +1,10 @@
 import os
+import numpy as np
 import torch
 from torch.utils.data import Dataset
 from torch_geometric.loader import DataLoader
 from torch_geometric.data import Data
+from torch.utils.data import WeightedRandomSampler
 
 device = torch.device('cuda:0')
 
@@ -32,8 +34,10 @@ class GraphDataset(Dataset):
 
             adj.fill_diagonal_(0)  # self loop 제거
 
-            edge_index = torch.nonzero(adj, as_tuple=True) # True인 인덱스 추출
+            # Edge Index
+            edge_index = torch.nonzero(adj, as_tuple=False).t().contiguous() # (N, 2) -> (2, N)
 
+            # Edge Weight
             row, col = edge_index
             edge_attr = adj[row, col]
 
@@ -58,13 +62,42 @@ def get_dataloaders(train_path, test_path, batch_size):
     return train_dataloader, test_dataloader
 
 
+
+def get_balanced_dataloaders(train_path, test_path, batch_size):
+    train_dataset, test_dataset = GraphDataset(train_path), GraphDataset(test_path)
+
+    y_train = train_dataset.y
+    if isinstance(y_train, torch.Tensor):
+        y_train = y_train.numpy()
+
+    class_counts = np.bincount(y_train)  # attention: (465, 1175), mental: [1026 2257]
+
+    class_weights = 1.0 / class_counts  # 각 class별 가중치 계산 (개수가 적을수록 높은 가중치)
+
+    sample_weights = [class_weights[label] for label in y_train]
+    sample_weights = torch.DoubleTensor(sample_weights)
+
+    sampler = WeightedRandomSampler(
+        weights=sample_weights,
+        num_samples=len(sample_weights),
+        replacement=True
+    )
+
+    train_dataloader = DataLoader(train_dataset, batch_size=batch_size, sampler=sampler, shuffle=False, drop_last=True)
+    test_dataloader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, drop_last=True)
+
+    return train_dataloader, test_dataloader
+
+
 if __name__ == "__main__":
     import os
-    src_path = os.path.join(os.getcwd(), 'data')
-    train_path = os.path.join(src_path, 'driver_train_dataset.pt')
-    test_path = os.path.join(src_path, 'driver_test_dataset.pt')
+    src_path = os.path.join(os.getcwd())
+    train_path = os.path.join(src_path, 'mi_train_dataset.pt')
+    test_path = os.path.join(src_path, 'mi_test_dataset.pt')
 
-    train_dataloader, test_dataloader = get_dataloaders(train_path, test_path, 64)
+    train_dataloader, test_dataloader = get_dataloaders(train_path, test_path, 32)
 
-    for x, y in train_dataloader:
-        print(x, y.shape)
+    # train_dataloader, test_dataloader = get_balanced_dataloaders(train_path, test_path, 64)
+
+    for batch in train_dataloader:
+        print(batch)
